@@ -5,10 +5,13 @@ namespace App;
 use App\Commands\Visit;
 
 use const SEEK_CUR;
+use const STREAM_IPPROTO_IP;
+use const STREAM_PF_UNIX;
+use const STREAM_SOCK_STREAM;
 
 final class Parser
 {
-    private const WORKERS = 8;
+    private const WORKERS = 12;
     private const BUF_SIZE = 163_840; // 160 KB — L1-cache-friendly reads
     private const PROBE_SIZE = 2_097_152; // 2 MB warm-up scan
 
@@ -100,50 +103,94 @@ final class Parser
         }
         $ends[self::WORKERS - 1] = $fileSize;
 
-        // Fork workers
-        $myPid = getmypid();
-        $tmpFiles = [];
-        for ($i = 0; $i < self::WORKERS; $i++) {
-            $tmpFiles[$i] = sys_get_temp_dir() . "/parser_{$myPid}_{$i}.tmp";
-        }
+        // Fork WORKERS - 1 children via socket pairs; parent handles last chunk
+        $pipes = [];
+        $childPids = [];
 
-        $pids = [];
-        for ($i = 0; $i < self::WORKERS; $i++) {
-            if ($starts[$i] >= $ends[$i]) {
-                file_put_contents($tmpFiles[$i], '');
-                continue;
-            }
+        for ($i = 0; $i < self::WORKERS - 1; $i++) {
+            $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
 
             $pid = pcntl_fork();
             if ($pid === -1) {
                 throw new \Exception('pcntl_fork() failed');
             }
             if ($pid === 0) {
-                $wCounts = $this->processChunk(
+                fclose($pair[0]); // child: close read-end
+                $result = $this->processChunk(
                     $inputPath, $starts[$i], $ends[$i],
                     $slugIds, $dateChars, $slugCount, $dateCount,
                 );
-                file_put_contents($tmpFiles[$i], pack('v*', ...$wCounts));
+                // Adaptive width: halves payload when counts fit in uint16
+                $use16 = max($result) <= 65535;
+                fwrite($pair[1], $use16 ? "\x00" : "\x01");
+                $fmt = $use16 ? 'v*' : 'V*';
+                foreach (array_chunk($result, 8192) as $batch) {
+                    fwrite($pair[1], pack($fmt, ...$batch));
+                }
+                fclose($pair[1]);
                 exit(0);
             }
-            $pids[$i] = $pid;
+
+            fclose($pair[1]); // parent: close write-end so EOF is detectable
+            $pipes[] = $pair[0];
+            $childPids[] = $pid;
         }
 
-        foreach ($pids as $pid) {
-            pcntl_waitpid($pid, $status);
+        // Parent processes last chunk while children run concurrently
+        $counts = $this->processChunk(
+            $inputPath, $starts[self::WORKERS - 1], $ends[self::WORKERS - 1],
+            $slugIds, $dateChars, $slugCount, $dateCount,
+        );
+
+        // Drain all child sockets concurrently via stream_select
+        $buffers = [];
+        $open = [];
+        $pipeIndex = [];
+        foreach ($pipes as $k => $pipe) {
+            stream_set_blocking($pipe, false);
+            $buffers[$k] = '';
+            $rid = (int) $pipe;
+            $open[$rid] = $pipe;
+            $pipeIndex[$rid] = $k;
         }
 
-        // Merge flat count arrays
-        $counts = array_fill(0, $slugCount * $dateCount, 0);
-        for ($i = 0; $i < self::WORKERS; $i++) {
-            $raw = file_get_contents($tmpFiles[$i]);
-            unlink($tmpFiles[$i]);
-            if ($raw === '') continue;
-            $wCounts = unpack('v*', $raw);
-            $j = 0;
-            foreach ($wCounts as $v) {
-                $counts[$j++] += $v;
+        while ($open) {
+            $read = array_values($open);
+            $w = null;
+            $e = null;
+            stream_select($read, $w, $e, 5);
+
+            foreach ($read as $pipe) {
+                $rid = (int) $pipe;
+                $k = $pipeIndex[$rid];
+                $data = fread($pipe, 131072);
+                if ($data !== '' && $data !== false) {
+                    $buffers[$k] .= $data;
+                }
+                if (feof($pipe)) {
+                    $raw = $buffers[$k];
+                    fclose($pipe);
+                    unset($open[$rid], $pipeIndex[$rid], $buffers[$k]);
+
+                    if ($raw === '') {
+                        continue;
+                    }
+
+                    $isV16 = ord($raw[0]) === 0;
+                    $fmt = $isV16 ? 'v*' : 'V*';
+                    $step = $isV16 ? 16384 : 32768;
+                    $j = 0;
+                    for ($off = 1, $rawLen = strlen($raw); $off < $rawLen; $off += $step) {
+                        foreach (unpack($fmt, substr($raw, $off, $step)) as $v) {
+                            $counts[$j++] += $v;
+                        }
+                    }
+                }
             }
+        }
+
+        foreach ($childPids as $pid) {
+            pcntl_waitpid($pid, $status);
         }
 
         // Write JSON
