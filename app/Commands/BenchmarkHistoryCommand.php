@@ -129,10 +129,23 @@ final class BenchmarkHistoryCommand
         // Header: entry_date, branch1, branch2, ...
         fputs($fp, 'entry_date,' . implode(',', $topBranches) . "\n");
 
+        $previousValues = [];
+
         foreach ($pivotedData as $date => $branches) {
+            $currentValues = [];
+            foreach ($topBranches as $branch) {
+                $currentValues[$branch] = $branches[$branch] ?? '';
+            }
+
+            if ($currentValues === $previousValues) {
+                continue;
+            }
+
+            $previousValues = $currentValues;
+
             $row = [$date];
             foreach ($topBranches as $branch) {
-                $row[] = $branches[$branch] ?? '';
+                $row[] = $currentValues[$branch];
             }
             fputs($fp, implode(',', $row) . "\n");
         }
