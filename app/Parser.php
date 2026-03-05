@@ -2,8 +2,6 @@
 
 namespace App;
 
-use App\Commands\Visit;
-
 use const SEEK_CUR;
 use const STREAM_PF_UNIX;
 use const STREAM_SOCK_STREAM;
@@ -83,16 +81,6 @@ final class Parser
         }
         unset($sample);
 
-        // Seed any slugs not seen in the warm-up sample
-        foreach (Visit::all() as $visit) {
-            $slug = substr($visit->uri, 25);
-            if (!isset($slugBaseMap[$slug])) {
-                $slugBaseMap[$slug] = $slugCount * $dateCount;
-                $slugLabels[$slugCount] = $slug;
-                $slugCount++;
-            }
-        }
-
         $outputSize = $slugCount * $dateCount;
 
         // Compute line-aligned chunk boundaries
@@ -124,7 +112,7 @@ final class Parser
             }
             if ($pid === 0) {
                 fclose($pair[0]);
-                $result = $this->processChunk(
+                $result = self::processChunk(
                     $inputPath, $starts[$i], $ends[$i],
                     $slugBaseMap, $dateIds, $next, $outputSize,
                 );
@@ -137,7 +125,7 @@ final class Parser
         }
 
         // Parent processes last chunk while children run concurrently
-        $parentOutput = $this->processChunk(
+        $parentOutput = self::processChunk(
             $inputPath, $starts[self::WORKERS - 1], $ends[self::WORKERS - 1],
             $slugBaseMap, $dateIds, $next, $outputSize,
         );
@@ -211,7 +199,7 @@ final class Parser
         fclose($out);
     }
 
-    private function processChunk(
+    private static function processChunk(
         string $inputPath,
         int $start,
         int $end,
@@ -247,10 +235,20 @@ final class Parser
             }
 
             $p = 25; // slug start (past 25-char URL prefix)
-            $fence = $lastNl - 720; // 6 × ~120-byte max-line guard
+            $fence = $lastNl - 960; // 8 × ~120-byte max-line guard
 
-            // Hot loop, unrolled 6×
+            // Hot loop, unrolled 8×
             while ($p < $fence) {
+                $sep = strpos($chunk, ',', $p);
+                $idx = $slugBaseMap[substr($chunk, $p, $sep - $p)] + $dateIds[substr($chunk, $sep + 3, 8)];
+                $output[$idx] = $next[$output[$idx]];
+                $p = $sep + 52;
+
+                $sep = strpos($chunk, ',', $p);
+                $idx = $slugBaseMap[substr($chunk, $p, $sep - $p)] + $dateIds[substr($chunk, $sep + 3, 8)];
+                $output[$idx] = $next[$output[$idx]];
+                $p = $sep + 52;
+
                 $sep = strpos($chunk, ',', $p);
                 $idx = $slugBaseMap[substr($chunk, $p, $sep - $p)] + $dateIds[substr($chunk, $sep + 3, 8)];
                 $output[$idx] = $next[$output[$idx]];
