@@ -83,11 +83,12 @@ final class Parser
 
         $outputSize = $slugCount * $dateCount;
 
-        // Compute line-aligned chunk boundaries
+        // Compute line-aligned chunk boundaries (9 chunks: 8 children + 1 parent)
+        $totalChunks = self::WORKERS + 1;
         $boundaries = [0];
         $fh = fopen($inputPath, 'rb');
-        for ($i = 1; $i < self::WORKERS; $i++) {
-            fseek($fh, (int) ($i * $fileSize / self::WORKERS));
+        for ($i = 1; $i < $totalChunks; $i++) {
+            fseek($fh, (int) ($i * $fileSize / $totalChunks));
             fgets($fh);
             $boundaries[] = ftell($fh);
         }
@@ -119,8 +120,21 @@ final class Parser
             $sockets[$i] = $pair[0];
         }
 
-        // Drain children as they finish via stream_select
+        // Parent processes the last chunk
+        $parentResult = self::processChunk(
+            $inputPath, $boundaries[self::WORKERS], $boundaries[$totalChunks],
+            $slugBaseMap, $dateIds, $next, $outputSize,
+        );
+
+        // Initialize counts from parent result
         $counts = array_fill(0, $outputSize, 0);
+        $j = 0;
+        foreach (unpack('C*', $parentResult) as $v) {
+            $counts[$j++] += $v;
+        }
+        unset($parentResult);
+
+        // Drain children as they finish via stream_select
 
         while ($sockets !== []) {
             $read = $sockets;
