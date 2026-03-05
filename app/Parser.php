@@ -108,9 +108,10 @@ final class Parser
             }
             if ($pid === 0) {
                 fclose($pair[0]);
-                $result = self::processChunk(
+                $result = str_repeat(chr(0), $outputSize);
+                self::processChunk(
                     $inputPath, $boundaries[$i], $boundaries[$i + 1],
-                    $slugBaseMap, $dateIds, $next, $outputSize,
+                    $slugBaseMap, $dateIds, $next, $result,
                 );
                 fwrite($pair[1], $result);
                 fclose($pair[1]);
@@ -121,9 +122,10 @@ final class Parser
         }
 
         // Parent processes the last chunk
-        $parentResult = self::processChunk(
+        $parentResult = str_repeat(chr(0), $outputSize);
+        self::processChunk(
             $inputPath, $boundaries[self::WORKERS], $boundaries[$totalChunks],
-            $slugBaseMap, $dateIds, $next, $outputSize,
+            $slugBaseMap, $dateIds, $next, $parentResult,
         );
 
         // Initialize counts from parent result
@@ -199,15 +201,14 @@ final class Parser
     }
 
     private static function processChunk(
-        string $inputPath,
-        int $start,
-        int $end,
-        array $slugBaseMap,
-        array $dateIds,
-        array $next,
-        int $outputSize,
-    ): string {
-        $output = str_repeat(chr(0), $outputSize);
+        $inputPath,
+        $start,
+        $end,
+        $slugBaseMap,
+        $dateIds,
+        $next,
+        &$output,
+    ) {
         $fh = fopen($inputPath, 'rb');
         stream_set_read_buffer($fh, 0);
         fseek($fh, $start);
@@ -301,7 +302,5 @@ final class Parser
         }
 
         fclose($fh);
-
-        return $output;
     }
 }
