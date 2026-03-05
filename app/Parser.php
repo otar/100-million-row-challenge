@@ -9,9 +9,9 @@ use const STREAM_IPPROTO_IP;
 
 final class Parser
 {
-    private const WORKERS = 12;
-    private const BUF_SIZE = 524288; // 512 KB — fewer fread syscalls
-    private const PROBE_SIZE = 2_097_152; // 2 MB warm-up scan
+    private const WORKERS = 8;
+    private const BUF_SIZE = 163_840;
+    private const PROBE_SIZE = 2_097_152;
 
     public function parse(string $inputPath, string $outputPath): void
     {
